@@ -95,8 +95,16 @@ async function run() {
           try {
             await UsersCollection.updateOne(
               { email: userEmail },
-              { $addToSet: { purchasedCourses: new ObjectId(courseId) } }
+              {
+                $addToSet: {
+                  purchasedCourses: {
+                    courseId: new ObjectId(courseId),
+                    completedModules: [],
+                  },
+                },
+              }
             );
+
             console.log(`Added course ${courseId} to user ${userEmail}`);
           } catch (err) {
             console.error("Failed to add purchased course:", err);
@@ -227,7 +235,7 @@ async function run() {
       }
     });
 
-    //  Update user profile (name, phone, bloodGroup, avatar, district, upazila)
+    //  Update user profile
     app.patch("/api/users/:email", verifyToken, async (req, res) => {
       try {
         const { email } = req.params;
@@ -410,6 +418,36 @@ async function run() {
           .json({ message: "Failed to fetch course", error: err.message });
       }
     });
+    // Mark a module as complete
+    app.patch(
+      "/api/users/:email/completeModule",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const { email } = req.params;
+          const { courseId, moduleIndex } = req.body;
+
+          if (req.user.email !== email) {
+            return res.status(403).json({ message: "Forbidden" });
+          }
+          const courseObjectId = new ObjectId(courseId);
+          await UsersCollection.updateOne(
+            { email, "purchasedCourses.courseId": courseObjectId },
+            {
+              $addToSet: { "purchasedCourses.$.completedModules": moduleIndex },
+            }
+          );
+
+          res.status(200).json({ message: "Module marked complete" });
+        } catch (err) {
+          console.log(err);
+          res
+            .status(500)
+            .json({ message: "Failed to update module", error: err.message });
+        }
+      }
+    );
+
     // ================================= Payment Integration =================
     // POST /api/create-checkout-session
     app.post("/api/create-checkout-session", verifyToken, async (req, res) => {
@@ -472,7 +510,6 @@ async function run() {
         res.status(500).json({ message: err.message });
       }
     });
-    
   } catch (error) {
     console.error("MongoDB connection failed", error);
   }
