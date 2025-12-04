@@ -6,6 +6,12 @@ const app = express();
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { ObjectId } = require("mongodb");
+const Stripe = require("stripe");
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
+  apiVersion: "2023-08-16",
+}); // use latest
+const FRONTEND = process.env.CLIENT_URL || "http://localhost:5173";
+
 // Middleware
 // app.use(
 //   cors({
@@ -19,7 +25,7 @@ app.use(
     credentials: true,
   })
 );
-app.use(express.json());
+
 app.use(cookieParser());
 
 // Port
@@ -62,6 +68,45 @@ async function run() {
     const UsersCollection = client.db("UserDB").collection("Users");
     const CoursesCollection = client.db("CourseDB").collection("Courses");
 
+    app.post(
+      "/webhook",
+      express.raw({ type: "application/json" }), // required for Stripe webhook signature
+      async (req, res) => {
+        const sig = req.headers["stripe-signature"];
+        let event;
+
+        try {
+          event = stripe.webhooks.constructEvent(
+            req.body,
+            sig,
+            process.env.STRIPE_WEBHOOK_SECRET
+          );
+        } catch (err) {
+          console.error("Webhook signature verification failed.", err.message);
+          return res.status(400).send(`Webhook Error: ${err.message}`);
+        }
+
+        // Handle successful payment
+        if (event.type === "checkout.session.completed") {
+          const session = event.data.object;
+          const courseId = session.metadata.courseId;
+          const userEmail = session.metadata.userEmail;
+
+          try {
+            await UsersCollection.updateOne(
+              { email: userEmail },
+              { $addToSet: { purchasedCourses: new ObjectId(courseId) } }
+            );
+            console.log(`Added course ${courseId} to user ${userEmail}`);
+          } catch (err) {
+            console.error("Failed to add purchased course:", err);
+          }
+        }
+
+        res.status(200).json({ received: true });
+      }
+    );
+    app.use(express.json());
     app.post("/api/register", async (req, res) => {
       try {
         const {
@@ -93,6 +138,7 @@ async function run() {
           avatar: avatarUrl,
           roles: roles || "user",
           status: status || "active",
+          purchasedCourses: [],
           createdAt: createdAt ? new Date(createdAt) : new Date(),
         };
 
@@ -255,7 +301,7 @@ async function run() {
           tags,
           modules,
           batches,
-          image
+          image,
         } = req.body;
 
         if (
@@ -364,6 +410,69 @@ async function run() {
           .json({ message: "Failed to fetch course", error: err.message });
       }
     });
+    // ================================= Payment Integration =================
+    // POST /api/create-checkout-session
+    app.post("/api/create-checkout-session", verifyToken, async (req, res) => {
+      try {
+        const { courseId } = req.body;
+        if (!courseId)
+          return res.status(400).json({ message: "courseId required" });
+
+        // fetch course from DB (adjust collection name if different)
+        const course = await CoursesCollection.findOne({
+          _id: new ObjectId(courseId),
+        });
+        if (!course)
+          return res.status(404).json({ message: "Course not found" });
+
+        // Convert to cents (Stripe expects integer in smallest currency unit)
+        const priceInCents = Math.round((course.price || 0) * 100);
+
+        // create a Checkout Session
+        const session = await stripe.checkout.sessions.create({
+          payment_method_types: ["card"],
+          mode: "payment",
+          line_items: [
+            {
+              price_data: {
+                currency: "usd", // change if needed
+                product_data: {
+                  name: course.title,
+                  description: course.description || undefined,
+                },
+                unit_amount: priceInCents,
+              },
+              quantity: 1,
+            },
+          ],
+          customer_email: req.user?.email, // optional: pre-fill email
+          success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}&courseId=${courseId}`,
+          cancel_url: `${FRONTEND}/course/${courseId}`,
+          metadata: {
+            courseId: courseId,
+            userEmail: req.user?.email || "",
+          },
+        });
+
+        // return session URL (simplest) or session.id
+        res.json({ url: session.url });
+      } catch (err) {
+        console.error("Create checkout session error:", err);
+        res.status(500).json({
+          message: "Failed to create checkout session",
+          error: err.message,
+        });
+      }
+    });
+    app.get("/api/session/:id", async (req, res) => {
+      try {
+        const session = await stripe.checkout.sessions.retrieve(req.params.id);
+        res.json(session);
+      } catch (err) {
+        res.status(500).json({ message: err.message });
+      }
+    });
+    
   } catch (error) {
     console.error("MongoDB connection failed", error);
   }
