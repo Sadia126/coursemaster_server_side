@@ -67,6 +67,9 @@ async function run() {
 
     const UsersCollection = client.db("UserDB").collection("Users");
     const CoursesCollection = client.db("CourseDB").collection("Courses");
+    const AssignmentSubmissionsCollection = client
+      .db("AssignmentDB")
+      .collection("AssignmentSubmissions");
 
     app.post(
       "/webhook",
@@ -303,51 +306,101 @@ async function run() {
           title,
           description,
           instructor,
-          syllabus,
           price,
           category,
           tags,
-          modules,
-          batches,
+          syllabus,
           image,
+          milestones,
         } = req.body;
 
-        if (
-          !title ||
-          !modules ||
-          !Array.isArray(modules) ||
-          modules.length === 0
-        ) {
-          return res
-            .status(400)
-            .json({ message: "Title and at least one module are required" });
+        // ====== VALIDATION ======
+        if (tags && !Array.isArray(tags)) {
+          return res.status(400).json({ message: "Tags must be an array" });
         }
 
+        if (!title)
+          return res.status(400).json({ message: "Title is required" });
+
+        if (
+          !milestones ||
+          !Array.isArray(milestones) ||
+          milestones.length === 0
+        )
+          return res
+            .status(400)
+            .json({ message: "At least one milestone is required" });
+
+        for (const m of milestones) {
+          if (!m.title)
+            return res
+              .status(400)
+              .json({ message: "Every milestone must have a title" });
+
+          if (!m.modules || m.modules.length === 0)
+            return res
+              .status(400)
+              .json({ message: "Every milestone must contain modules" });
+
+          for (const mod of m.modules) {
+            if (!mod.moduleType)
+              return res
+                .status(400)
+                .json({ message: "Each module must include moduleType" });
+
+            // Validate module by type
+            if (mod.moduleType === "text" && !mod.content)
+              return res.status(400).json({
+                message: "Text module requires content",
+              });
+
+            if (mod.moduleType === "video" && !mod.videoUrl)
+              return res.status(400).json({
+                message: "Video module requires videoUrl",
+              });
+
+            if (mod.moduleType === "assignment" && !mod.assignment)
+              return res.status(400).json({
+                message: "Assignment module requires assignment text",
+              });
+
+            if (
+              mod.moduleType === "mcq" &&
+              (!mod.mcqs || mod.mcqs.length === 0)
+            )
+              return res.status(400).json({
+                message: "MCQ module must have at least 1 question",
+              });
+          }
+        }
+
+        // ====== COURSE OBJECT ======
         const course = {
           title,
           description: description || "",
           instructor: instructor || "",
-          syllabus: syllabus || "",
           price: price || 0,
           category: category || "",
-          tags: Array.isArray(tags) ? tags : [],
-          modules,
-          batches: batches || [],
           image: image || "",
+          syllabus: syllabus || "",
+          milestones,
+          tags: tags || [],
           createdBy: req.user.email,
           createdAt: new Date(),
         };
 
         const result = await CoursesCollection.insertOne(course);
+
         res.status(201).json({
           message: "Course created successfully",
           courseId: result.insertedId,
         });
       } catch (err) {
         console.error("Create Course Error:", err);
-        res
-          .status(500)
-          .json({ message: "Failed to create course", error: err.message });
+        res.status(500).json({
+          message: "Failed to create course",
+          error: err.message,
+        });
       }
     });
 
@@ -508,6 +561,134 @@ async function run() {
         res.json(session);
       } catch (err) {
         res.status(500).json({ message: err.message });
+      }
+    });
+
+    // ================================= Assignment Submission =====================
+    app.post("/api/assignments/submit", verifyToken, async (req, res) => {
+      try {
+        const { courseId, milestoneIndex, moduleIndex, submissionText } =
+          req.body;
+
+        if (
+          !courseId ||
+          milestoneIndex === undefined ||
+          moduleIndex === undefined
+        ) {
+          return res.status(400).json({
+            message: "courseId, milestoneIndex and moduleIndex are required",
+          });
+        }
+
+        if (!submissionText || submissionText.trim() === "") {
+          return res
+            .status(400)
+            .json({ message: "Submission text is required" });
+        }
+
+        const submission = {
+          courseId: new ObjectId(courseId),
+          milestoneIndex,
+          moduleIndex,
+          studentEmail: req.user.email,
+          studentName: req.user.name,
+          submissionText,
+          submittedAt: new Date(),
+        };
+
+        const result = await AssignmentSubmissionsCollection.insertOne(
+          submission
+        );
+
+        res.status(201).json({
+          message: "Assignment submitted successfully",
+          submissionId: result.insertedId,
+        });
+      } catch (err) {
+        console.error("Assignment Submission Error:", err);
+        res.status(500).json({
+          message: "Failed to submit assignment",
+          error: err.message,
+        });
+      }
+    });
+    app.get("/api/assignments/submission", verifyToken, async (req, res) => {
+      try {
+        const { courseId, milestoneIndex, moduleIndex } = req.query;
+
+        const submission = await AssignmentSubmissionsCollection.findOne({
+          courseId: new ObjectId(courseId),
+          milestoneIndex: Number(milestoneIndex),
+          moduleIndex: Number(moduleIndex),
+          studentEmail: req.user.email,
+        });
+
+        res.status(200).json({ submission });
+      } catch (err) {
+        console.error("Fetch Submission Error:", err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+    // ================================= MCQ Results =================================
+    app.post("/api/save-mcq", verifyToken, async (req, res) => {
+      try {
+        const { courseId, moduleIndex, questionIndex, isCorrect } = req.body;
+
+        if (
+          !courseId ||
+          moduleIndex === undefined ||
+          questionIndex === undefined
+        ) {
+          return res.status(400).json({
+            message: "courseId, moduleIndex and questionIndex are required",
+          });
+        }
+
+        // Always trust the logged-in user instead of body.email
+        const email = req.user.email;
+
+        // We will store courseId as a STRING so it matches your frontend filter:
+        // r.courseId === id && r.moduleIndex === globalIndex
+        const mcqEntry = {
+          courseId, // keep as string
+          moduleIndex,
+          questionIndex,
+          isCorrect: !!isCorrect,
+          savedAt: new Date(),
+        };
+
+        // Remove any previous result for this exact question in this module & course
+        await UsersCollection.updateOne(
+          { email },
+          {
+            $pull: {
+              mcqResults: {
+                courseId: courseId,
+                moduleIndex: moduleIndex,
+                questionIndex: questionIndex,
+              },
+            },
+          }
+        );
+
+        // Then push the new result
+        const result = await UsersCollection.updateOne(
+          { email },
+          {
+            $push: { mcqResults: mcqEntry },
+          }
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        res.status(200).json({ message: "MCQ result saved" });
+      } catch (err) {
+        console.error("Save MCQ Error:", err);
+        res
+          .status(500)
+          .json({ message: "Failed to save MCQ result", error: err.message });
       }
     });
   } catch (error) {
