@@ -500,6 +500,23 @@ async function run() {
         }
       }
     );
+    app.get("/api/courses/:id/students", verifyToken, async (req, res) => {
+      const { id } = req.params;
+
+      try {
+        const students = await UsersCollection.find({
+          "purchasedCourses.courseId": new ObjectId(id),
+        })
+          .project({ password: 0 })
+          .toArray();
+
+        res.json({ students });
+      } catch (err) {
+        res
+          .status(500)
+          .json({ message: "Failed to fetch", error: err.message });
+      }
+    });
 
     // ================================= Payment Integration =================
     // POST /api/create-checkout-session
