@@ -517,6 +517,78 @@ async function run() {
           .json({ message: "Failed to fetch", error: err.message });
       }
     });
+    // Update assignment mark
+    app.patch(
+      "/api/users/:email/assignment-mark",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const { email } = req.params;
+          const { courseId, milestoneIndex, moduleIndex, mark } = req.body;
+
+          if (req.user.email !== email) {
+            return res.status(403).json({ message: "Forbidden" });
+          }
+
+          // Add or update mark
+          const update = {
+            $set: {
+              [`assignmentMarks.${courseId}.${milestoneIndex}.${moduleIndex}`]:
+                mark,
+            },
+          };
+
+          await UsersCollection.updateOne({ email }, update, { upsert: true });
+
+          res.status(200).json({ message: "Mark saved successfully" });
+        } catch (err) {
+          console.error(err);
+          res
+            .status(500)
+            .json({ message: "Failed to save mark", error: err.message });
+        }
+      }
+    );
+    // Fetch all submissions for a specific module (Admin)
+    app.get(
+      "/api/assignments/submissions/admin",
+      verifyToken,
+      async (req, res) => {
+        try {
+          // OPTIONAL: Only allow admins or instructors
+          const user = await UsersCollection.findOne({ email: req.user.email });
+          if (!user || user.roles !== "admin") {
+            return res.status(403).json({ message: "Forbidden: Admins only" });
+          }
+
+          const { courseId, milestoneIndex, moduleIndex } = req.query;
+
+          if (
+            !courseId ||
+            milestoneIndex === undefined ||
+            moduleIndex === undefined
+          ) {
+            return res.status(400).json({
+              message: "courseId, milestoneIndex and moduleIndex are required",
+            });
+          }
+
+          const submissions = await AssignmentSubmissionsCollection.find({
+            courseId: new ObjectId(courseId),
+            milestoneIndex: Number(milestoneIndex),
+            moduleIndex: Number(moduleIndex),
+          }).toArray();
+
+          res.status(200).json({ submissions });
+        } catch (err) {
+          console.error("Fetch all submissions error:", err);
+          res.status(500).json({
+            message: "Failed to fetch submissions",
+            error: err.message,
+          });
+        }
+      }
+    );
 
     // ================================= Payment Integration =================
     // POST /api/create-checkout-session
@@ -646,6 +718,46 @@ async function run() {
         res.status(500).json({ error: err.message });
       }
     });
+
+    // Fetch all courses and their assignment submissions (Admin)
+    app.get("/api/assignments/all-courses", verifyToken, async (req, res) => {
+      try {
+        const user = await UsersCollection.findOne({ email: req.user.email });
+        if (!user || user.roles !== "admin") {
+          return res.status(403).json({ message: "Forbidden: Admins only" });
+        }
+
+        // Fetch all submissions grouped by courseId
+        const submissions = await AssignmentSubmissionsCollection.aggregate([
+          {
+            $group: {
+              _id: "$courseId",
+              submissions: { $push: "$$ROOT" },
+            },
+          },
+        ]).toArray();
+
+        // Optional: fetch course details from CourseDB
+        const coursesWithSubmissions = await Promise.all(
+          submissions.map(async (item) => {
+            const course = await CoursesCollection.findOne({ _id: item._id });
+            return {
+              courseId: item._id,
+              courseTitle: course?.title || "Unknown",
+              submissions: item.submissions,
+            };
+          })
+        );
+
+        res.status(200).json({ courses: coursesWithSubmissions });
+      } catch (err) {
+        console.error("Fetch all courses error:", err);
+        res
+          .status(500)
+          .json({ message: "Failed to fetch courses", error: err.message });
+      }
+    });
+
     // ================================= MCQ Results =================================
     app.post("/api/save-mcq", verifyToken, async (req, res) => {
       try {
